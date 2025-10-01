@@ -1,0 +1,102 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch: # allow manual release trigger
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.2', '8.3', '8.4']
+        dependencies: [lowest, highest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: composer:v2, phpunit, phpstan, phpcs
+          extensions: mbstring, intl, pdo_mysql, gd, redis
+          ini-values: |
+            post_max_size=256M
+            upload_max_filesize=256M
+            max_execution_time=120
+            memory_limit=1G
+
+      - name: Install dependencies
+        run: |
+          if [[ "${{ matrix.dependencies }}" == "lowest" ]]; then
+            composer update --prefer-lowest --prefer-stable --no-progress --no-interaction
+          else
+            composer update --no-progress --no-interaction
+          fi
+
+      - name: Run PHPCS
+        run: phpcs --standard=PSR12 src/
+
+      - name: Run PHPStan
+        run: phpstan analyse src --level=max
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit --coverage-text
+
+  release:
+    needs: tests
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.4
+          tools: composer:v2, jq
+
+      - name: Install dependencies
+        run: composer install --no-progress --no-interaction
+
+      # 1. Get next version number using release-drafter
+      - name: Draft Release
+        id: release
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. Update composer.json version automatically
+      - name: Bump version in composer.json
+        run: |
+          VERSION=${{ steps.release.outputs.tag_name }}
+          VERSION=${VERSION#v} # strip leading v
+          echo "New version: $VERSION"
+          jq ".version = \"$VERSION\"" composer.json > composer.tmp.json && mv composer.tmp.json composer.json
+
+      # 3. Commit updated composer.json + CHANGELOG.md
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add composer.json CHANGELOG.md
+          git commit -m "chore(release): bump version to ${{ steps.release.outputs.tag_name }} [skip ci]" || echo "No changes to commit"
+          git push origin main
+
+      # 4. Create GitHub Release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag_name }}
+          name: Release ${{ steps.release.outputs.tag_name }}
+          body_path: CHANGELOG.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
