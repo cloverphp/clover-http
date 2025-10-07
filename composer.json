@@ -14,7 +14,7 @@
             "Clover\\Http\\": "src/Http/"
         }
     },
-    "autoload": {
+    "autoload-dev": {
         "psr-4": {
             "Clover\\Tests\\": "tests/"
         }
